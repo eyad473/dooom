@@ -71,11 +71,15 @@ function speakingFeedbackPrompt(level) {
 async function tgSend(env, chatId, text, keyboard) {
   const body = { chat_id: chatId, text, parse_mode: 'HTML' };
   if (keyboard) body.reply_markup = { inline_keyboard: keyboard };
-  await fetch(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/sendMessage`, {
+  const res = await fetch(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/sendMessage`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
   });
+  if (!res.ok) {
+    const errText = await res.text();
+    console.error('tgSend failed', res.status, errText);
+  }
 }
 
 async function tgAnswerCallback(env, callbackId, text) {
@@ -483,11 +487,11 @@ async function handleCommand(env, chatId, text) {
 
   if (cmd === '/start') {
     await env.DB.prepare(`INSERT OR IGNORE INTO users (chat_id) VALUES (?)`).bind(chatId).run();
-    return `أهلاً 👋 كل مهارات الإنجليزي بمكان واحد:\n\n📗 مفردات: /new /review\n🎧 استماع: /videos /todayvideo\n📖 قراءة: /reading\n✍️ كتابة: /write\n🎙️ تحدث: /speak (رسالة صوتية)\n🎭 محادثة تمثيلية: /roleplay\n🔊 نطق: /pronounce <كلمة>\n⚙️ /setlevel - حدد مستواك\n📊 /stats (فيها سلسلة أيامك 🔥)\n\nوأي وقت اكتب جملة إنجليزي عادية، برد عليك وبصححها.`;
+    return `أهلاً 👋 كل مهارات الإنجليزي بمكان واحد:\n\n📗 مفردات: /new /review\n🎧 استماع: /videos /todayvideo\n📖 قراءة: /reading\n✍️ كتابة: /write\n🎙️ تحدث: /speak (رسالة صوتية)\n🎭 محادثة تمثيلية: /roleplay\n🔊 نطق: /pronounce (كلمة)\n⚙️ /setlevel - حدد مستواك\n📊 /stats (فيها سلسلة أيامك 🔥)\n\nوأي وقت اكتب جملة إنجليزي عادية، برد عليك وبصححها.`;
   }
 
   if (cmd === '/help' || cmd === '/skills') {
-    return `📗 /new /review - مفردات\n🎧 /videos /todayvideo - استماع\n📖 /reading - قراءة\n✍️ /write - كتابة (بترسل نص بعدها)\n🎙️ /speak - تحدث (بترسل رسالة صوتية بعدها)\n🎭 /roleplay - محادثة تمثيلية (مقابلة عمل/مطعم/مطار/تسوق)\n🔊 /pronounce <نص> - نطق صوتي\n⚙️ /setlevel - تحديد المستوى\n📊 /stats - إحصائيات وسلسلة أيامك\n❌ /cancel أو /endroleplay - إلغاء تمرين حالي`;
+    return `📗 /new /review - مفردات\n🎧 /videos /todayvideo - استماع\n📖 /reading - قراءة\n✍️ /write - كتابة (بترسل نص بعدها)\n🎙️ /speak - تحدث (بترسل رسالة صوتية بعدها)\n🎭 /roleplay - محادثة تمثيلية (مقابلة عمل/مطعم/مطار/تسوق)\n🔊 /pronounce (نص) - نطق صوتي\n⚙️ /setlevel - تحديد المستوى\n📊 /stats - إحصائيات وسلسلة أيامك\n❌ /cancel أو /endroleplay - إلغاء تمرين حالي`;
   }
 
   if (cmd === '/reading') return await handleReading(env, chatId);

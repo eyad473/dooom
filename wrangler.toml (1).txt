@@ -1,0 +1,15 @@
+name = "english-coach-bot"
+main = "worker.js"
+compatibility_date = "2026-08-01"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "english-coach-db"
+database_id = "PUT_YOUR_D1_DATABASE_ID_HERE"
+
+[ai]
+binding = "AI"
+
+# تذكير صباحي الساعة 8:00 بتوقيت غزة (UTC+3) = 5:00 UTC
+[triggers]
+crons = ["0 5 * * *"]

@@ -1,0 +1,15 @@
+name = "english-coach-bot"
+main = "worker.js"
+compatibility_date = "2026-08-01"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "dooom"
+database_id = "145917cb-3dc1-4482-98f0-273994dd5549"
+
+[ai]
+binding = "AI"
+
+# تذكير صباحي الساعة 8:00 بتوقيت غزة (UTC+3) = 5:00 UTC
+[triggers]
+crons = ["0 5 * * *"]

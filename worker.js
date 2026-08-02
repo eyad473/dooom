@@ -136,6 +136,10 @@ async function touchStreak(env, chatId) {
   return newStreak;
 }
 
+function cleanJson(raw) {
+  return raw.trim().replace(/^```json\s*/i, '').replace(/^```\s*/, '').replace(/```\s*$/, '').trim();
+}
+
 async function callClaude(env, system, userText, maxTokens) {
   const res = await fetch(
     `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${env.GEMINI_API_KEY}`,
@@ -186,7 +190,7 @@ async function newWord(env, chatId, basePrompt = WORD_GEN_PROMPT) {
   const raw = await callClaude(env, prompt, 'اقترح كلمة جديدة الآن', 200);
   let data;
   try {
-    data = JSON.parse(raw.trim());
+    data = JSON.parse(cleanJson(raw));
   } catch {
     return null;
   }
@@ -288,10 +292,10 @@ async function getUserLevel(env, chatId) {
 // ---------- القراءة ----------
 async function handleReading(env, chatId) {
   const level = await getUserLevel(env, chatId);
-  const raw = await callClaude(env, readingGenPrompt(level), 'ولّد نص قراءة الآن', 500);
+  const raw = await callClaude(env, readingGenPrompt(level), 'ولّد نص قراءة الآن', 800);
   let d;
   try {
-    d = JSON.parse(raw.trim());
+    d = JSON.parse(cleanJson(raw));
   } catch {
     return 'صار خلل بتوليد نص القراءة، جرب كمان مرة.';
   }

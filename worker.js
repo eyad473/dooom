@@ -4,7 +4,7 @@
  * مستوى مستهدف: A2 → immersion
  *
  * Bindings: DB (D1)
- * Secrets: TELEGRAM_BOT_TOKEN, GEMINI_API_KEY, WEBHOOK_SECRET
+ * Secrets: TELEGRAM_BOT_TOKEN, GEMINI_API_KEY, COHERE_API_KEY, WEBHOOK_SECRET
  */
 
 const COACH_PROMPT = `إنت مدرّب لغة إنجليزية لمتعلم مستواه A2 وبيحب أسلوب الانغماس (immersion).
@@ -140,7 +140,7 @@ function cleanJson(raw) {
   return raw.trim().replace(/^```json\s*/i, '').replace(/^```\s*/, '').replace(/```\s*$/, '').trim();
 }
 
-async function callClaude(env, system, userText, maxTokens) {
+async function callGemini(env, system, userText, maxTokens) {
   const res = await fetch(
     `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${env.GEMINI_API_KEY}`,
     {
@@ -153,8 +153,48 @@ async function callClaude(env, system, userText, maxTokens) {
       }),
     }
   );
+  if (!res.ok) throw new Error(`Gemini failed: ${res.status}`);
   const data = await res.json();
-  return data?.candidates?.[0]?.content?.parts?.[0]?.text || '';
+  const text = data?.candidates?.[0]?.content?.parts?.[0]?.text;
+  if (!text) throw new Error('Gemini empty response');
+  return text;
+}
+
+async function callCohere(env, system, userText, maxTokens) {
+  const res = await fetch('https://api.cohere.com/v2/chat', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${env.COHERE_API_KEY}`,
+    },
+    body: JSON.stringify({
+      model: 'command-r-plus-08-2024',
+      max_tokens: maxTokens,
+      messages: [
+        { role: 'system', content: system },
+        { role: 'user', content: userText },
+      ],
+    }),
+  });
+  if (!res.ok) throw new Error(`Cohere failed: ${res.status}`);
+  const data = await res.json();
+  const text = data?.message?.content?.[0]?.text;
+  if (!text) throw new Error('Cohere empty response');
+  return text;
+}
+
+async function callClaude(env, system, userText, maxTokens) {
+  try {
+    return await callGemini(env, system, userText, maxTokens);
+  } catch (e) {
+    console.error('Gemini failed, falling back to Cohere', e);
+    try {
+      return await callCohere(env, system, userText, maxTokens);
+    } catch (e2) {
+      console.error('Cohere also failed', e2);
+      return '';
+    }
+  }
 }
 
 // ---------- SM2 ----------
@@ -385,26 +425,16 @@ async function roleplayChat(env, chatId, scenarioKey, userText) {
   const history = await env.DB.prepare(
     `SELECT role, content FROM roleplay_history WHERE chat_id = ? AND scenario = ? ORDER BY id DESC LIMIT 10`
   ).bind(chatId, scenarioKey).all();
-  const contents = history.results.reverse().map(r => ({
-    role: r.role === 'assistant' ? 'model' : 'user',
-    parts: [{ text: r.content }],
-  }));
-  contents.push({ role: 'user', parts: [{ text: userText }] });
 
-  const res = await fetch(
-    `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${env.GEMINI_API_KEY}`,
-    {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        contents,
-        systemInstruction: { parts: [{ text: scenario.system }] },
-        generationConfig: { maxOutputTokens: 400 },
-      }),
-    }
-  );
-  const data = await res.json();
-  const reply = data?.candidates?.[0]?.content?.parts?.[0]?.text || '...';
+  const transcript = history.results.reverse()
+    .map(r => `${r.role === 'assistant' ? 'You' : 'Learner'}: ${r.content}`)
+    .join('\n');
+
+  const fullPrompt = transcript
+    ? `${transcript}\nLearner: ${userText}\nYou:`
+    : `Learner: ${userText}\nYou:`;
+
+  const reply = (await callClaude(env, scenario.system, fullPrompt, 400)) || '...';
 
   await env.DB.batch([
     env.DB.prepare(`INSERT INTO roleplay_history (chat_id, scenario, role, content) VALUES (?, ?, 'user', ?)`).bind(chatId, scenarioKey, userText),

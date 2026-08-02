@@ -458,6 +458,115 @@ async function endRoleplay(env, chatId, scenarioKey) {
   return `✅ انتهت المحادثة.\n\n📝 ملاحظات:\n${feedback}`;
 }
 
+// ---------- اختبار تحديد المستوى ----------
+const LEVEL_TEST_QUESTIONS = [
+  // قواعد (12 سؤال، صعوبة متدرجة)
+  { q: 'I ___ a student.', opts: ['is', 'am', 'are', 'be'], correct: 1 },
+  { q: 'She ___ to school every day.', opts: ['go', 'goes', 'going', 'gone'], correct: 1 },
+  { q: 'There ___ some milk in the fridge.', opts: ['is', 'are', 'be', 'am'], correct: 0 },
+  { q: 'He has been living here ___ 2019.', opts: ['since', 'for', 'from', 'at'], correct: 0 },
+  { q: 'If I ___ more time, I would travel more.', opts: ['have', 'had', 'has', 'will have'], correct: 1 },
+  { q: 'By the time we arrived, the movie ___.', opts: ['started', 'has started', 'had started', 'starts'], correct: 2 },
+  { q: "She's the person ___ car was stolen.", opts: ['who', 'whose', 'which', 'that'], correct: 1 },
+  { q: 'I wish I ___ harder for the exam.', opts: ['study', 'studied', 'had studied', 'would study'], correct: 2 },
+  { q: 'Hardly ___ the door when the phone rang.', opts: ['I had opened', 'had I opened', 'I opened', 'did I opened'], correct: 1 },
+  { q: 'The report ___ by tomorrow.', opts: ['will complete', 'will be completed', 'completes', 'is completing'], correct: 1 },
+  { q: 'Not until she apologized ___ willing to forgive her.', opts: ['I was', 'was I', 'I had been', 'had I been'], correct: 1 },
+  { q: '"It\'s raining cats and dogs" means:', opts: ['light rain', 'very heavy rain', 'no rain', 'snow'], correct: 1 },
+  // مفردات (6 أسئلة، صعوبة متدرجة)
+  { q: "What does 'happy' mean?", opts: ['sad', 'glad', 'angry', 'tired'], correct: 1 },
+  { q: "Choose the opposite of 'expensive':", opts: ['cheap', 'costly', 'large', 'small'], correct: 0 },
+  { q: "'Postpone' means:", opts: ['cancel', 'delay', 'finish', 'start'], correct: 1 },
+  { q: "'Reliable' means:", opts: ['untrustworthy', 'trustworthy', 'fast', 'slow'], correct: 1 },
+  { q: "'Meticulous' means:", opts: ['careless', 'very careful and precise', 'lazy', 'generous'], correct: 1 },
+  { q: "'Ubiquitous' means:", opts: ['rare', 'present everywhere', 'hidden', 'expensive'], correct: 1 },
+  // فهم قرائي (نص + سؤالين)
+  { q: 'Read: "Maya works as a nurse in a busy hospital. She usually starts her shift at 7 a.m. and finishes at 3 p.m. On weekends, she volunteers at a community clinic to help people who cannot afford medical care."\n\nWhat time does Maya start work?', opts: ['6 a.m.', '7 a.m.', '3 p.m.', '8 a.m.'], correct: 1 },
+  { q: 'Same passage — Why does Maya volunteer on weekends?', opts: ['She needs more money', "To help people who can't afford care", 'Her boss told her to', 'She is bored'], correct: 1 },
+];
+
+function levelFromScore(score) {
+  if (score <= 3) return 'A1';
+  if (score <= 7) return 'A2';
+  if (score <= 11) return 'B1';
+  if (score <= 15) return 'B2';
+  if (score <= 18) return 'C1';
+  return 'C2';
+}
+
+function levelToIndex(lvl) {
+  const i = LEVELS.indexOf(lvl);
+  return i === -1 ? 2 : i;
+}
+
+function indexToLevel(i) {
+  return LEVELS[Math.min(Math.max(Math.round(i), 0), LEVELS.length - 1)];
+}
+
+function levelTestKeyboard(qIndex) {
+  const q = LEVEL_TEST_QUESTIONS[qIndex];
+  return q.opts.map((opt, i) => ([{ text: opt, callback_data: `LT:${i}` }]));
+}
+
+async function startLevelTest(env, chatId) {
+  await env.DB.prepare(`UPDATE users SET mode = 'leveltest', pending_prompt = ? WHERE chat_id = ?`)
+    .bind(JSON.stringify({ i: 0, score: 0 }), chatId).run();
+  const q = LEVEL_TEST_QUESTIONS[0];
+  await tgSend(env, chatId, `📝 اختبار تحديد المستوى (سؤال 1 من ${LEVEL_TEST_QUESTIONS.length})\n\n${q.q}`, levelTestKeyboard(0));
+}
+
+async function handleLevelTestAnswer(env, chatId, pendingPrompt, chosenIndex) {
+  let state;
+  try { state = JSON.parse(pendingPrompt); } catch { state = { i: 0, score: 0 }; }
+
+  const q = LEVEL_TEST_QUESTIONS[state.i];
+  if (chosenIndex === q.correct) state.score += 1;
+  state.i += 1;
+
+  if (state.i >= LEVEL_TEST_QUESTIONS.length) {
+    const mcqLevel = levelFromScore(state.score);
+    await env.DB.prepare(`UPDATE users SET pending_prompt = ? WHERE chat_id = ?`)
+      .bind(JSON.stringify({ phase: 'writing', mcqLevel, score: state.score }), chatId).run();
+    await tgSend(env, chatId, `✅ خلصت الأسئلة! (${state.score}/${LEVEL_TEST_QUESTIONS.length})\n\nآخر خطوة: اكتب 2-3 جمل بالإنجليزي عن نفسك أو يومك — هاد بيساعدني أدق نتيجتك أكتر.`);
+    return;
+  }
+
+  await env.DB.prepare(`UPDATE users SET pending_prompt = ? WHERE chat_id = ?`)
+    .bind(JSON.stringify(state), chatId).run();
+  const nextQ = LEVEL_TEST_QUESTIONS[state.i];
+  await tgSend(env, chatId, `📝 سؤال ${state.i + 1} من ${LEVEL_TEST_QUESTIONS.length}\n\n${nextQ.q}`, levelTestKeyboard(state.i));
+}
+
+async function finishLevelTestWithWriting(env, chatId, mcqLevel, score, writingSample) {
+  const assessPrompt = `You are an English level assessor. Read the learner's sentences and reply with ONLY one label, nothing else: A1, A2, B1, B2, C1, or C2.`;
+  const raw = (await callClaude(env, assessPrompt, writingSample, 10)).trim().toUpperCase();
+  const aiLevel = LEVELS.includes(raw) ? raw : mcqLevel;
+
+  const finalIndex = (levelToIndex(mcqLevel) + levelToIndex(aiLevel)) / 2;
+  const finalLevel = indexToLevel(finalIndex);
+
+  await env.DB.prepare(`UPDATE users SET mode = 'idle', pending_prompt = NULL, level = ? WHERE chat_id = ?`)
+    .bind(finalLevel, chatId).run();
+
+  await tgSend(env, chatId, `🎉 خلص الاختبار!\nنتيجة الأسئلة: ${score}/${LEVEL_TEST_QUESTIONS.length} (≈ ${mcqLevel})\nتقييم الكتابة: ≈ ${aiLevel}\n\nمستواك النهائي: <b>${finalLevel}</b>\nتم ضبطه تلقائيًا بالبوت. رح تجيك فيديوهات ونصوص واقتراحات يومية بهاد المستوى.`);
+}
+
+// ---------- القائمة الرئيسية التفاعلية ----------
+function mainMenuKeyboard() {
+  return [
+    [{ text: '📝 اختبار تحديد المستوى', callback_data: 'M:leveltest' }],
+    [{ text: '📗 كلمة جديدة', callback_data: 'M:new' }, { text: '🔁 مراجعة', callback_data: 'M:review' }],
+    [{ text: '🎧 فيديوهات', callback_data: 'M:videos' }, { text: '🎬 فيديو اليوم', callback_data: 'M:today' }],
+    [{ text: '📖 قراءة', callback_data: 'M:reading' }, { text: '✍️ كتابة', callback_data: 'M:write' }],
+    [{ text: '🎙️ تحدث', callback_data: 'M:speak' }, { text: '🎭 محادثة تمثيلية', callback_data: 'M:roleplay' }],
+    [{ text: '⚙️ تغيير المستوى', callback_data: 'M:setlevel' }, { text: '📊 إحصائياتي', callback_data: 'M:stats' }],
+  ];
+}
+
+async function sendMainMenu(env, chatId, intro) {
+  await tgSend(env, chatId, intro || '📋 اختار اللي بدك تسويه:', mainMenuKeyboard());
+}
+
 function ratingKeyboard(wordId) {
   return [[
     { text: '❌ ما عرفتها', callback_data: `rate:${wordId}:0` },
@@ -521,16 +630,28 @@ async function handleCommand(env, chatId, text) {
 
   if (cmd === '/start') {
     await env.DB.prepare(`INSERT OR IGNORE INTO users (chat_id) VALUES (?)`).bind(chatId).run();
-    return `أهلاً 👋 كل مهارات الإنجليزي بمكان واحد:\n\n📗 مفردات: /new /review\n🎧 استماع: /videos /todayvideo\n📖 قراءة: /reading\n✍️ كتابة: /write\n🎙️ تحدث: /speak (رسالة صوتية)\n🎭 محادثة تمثيلية: /roleplay\n🔊 نطق: /pronounce (كلمة)\n⚙️ /setlevel - حدد مستواك\n📊 /stats (فيها سلسلة أيامك 🔥)\n\nوأي وقت اكتب جملة إنجليزي عادية، برد عليك وبصححها.`;
+    await tgSend(env, chatId, 'أهلاً 👋 أنا مساعدك لتعلم الإنجليزي.\nلو أول مرة، ابدأ باختبار تحديد المستوى تحت.');
+    await sendMainMenu(env, chatId);
+    return null;
   }
 
   if (cmd === '/help' || cmd === '/skills') {
-    return `📗 /new /review - مفردات\n🎧 /videos /todayvideo - استماع\n📖 /reading - قراءة\n✍️ /write - كتابة (بترسل نص بعدها)\n🎙️ /speak - تحدث (بترسل رسالة صوتية بعدها)\n🎭 /roleplay - محادثة تمثيلية (مقابلة عمل/مطعم/مطار/تسوق)\n🔊 /pronounce (نص) - نطق صوتي\n⚙️ /setlevel - تحديد المستوى\n📊 /stats - إحصائيات وسلسلة أيامك\n❌ /cancel أو /endroleplay - إلغاء تمرين حالي`;
+    return `📋 /menu - القائمة التفاعلية (أزرار)\n📝 /leveltest - اختبار تحديد المستوى\n📗 /new /review - مفردات\n🎧 /videos /todayvideo - استماع\n📖 /reading - قراءة\n✍️ /write - كتابة (بترسل نص بعدها)\n🎙️ /speak - تحدث (بترسل رسالة صوتية بعدها)\n🎭 /roleplay - محادثة تمثيلية (مقابلة عمل/مطعم/مطار/تسوق)\n🔊 /pronounce (نص) - نطق صوتي\n⚙️ /setlevel - تحديد المستوى يدويًا\n📊 /stats - إحصائيات وسلسلة أيامك\n❌ /cancel أو /endroleplay - إلغاء تمرين حالي`;
   }
 
   if (cmd === '/reading') return await handleReading(env, chatId);
   if (cmd === '/write') return await startWriting(env, chatId);
   if (cmd === '/speak') return await startSpeaking(env, chatId);
+
+  if (cmd === '/leveltest') {
+    await startLevelTest(env, chatId);
+    return null;
+  }
+
+  if (cmd === '/menu') {
+    await sendMainMenu(env, chatId);
+    return null;
+  }
 
   if (cmd === '/cancel') {
     await env.DB.prepare(`UPDATE users SET mode = 'idle', pending_prompt = NULL WHERE chat_id = ?`).bind(chatId).run();
@@ -610,6 +731,33 @@ async function handleUpdate(env, update) {
       await setUserLevel(env, chatId, parts[1]);
     } else if (action === 'RP') {
       await startRoleplay(env, chatId, parts[1]);
+    } else if (action === 'LT') {
+      const u = await env.DB.prepare(`SELECT pending_prompt FROM users WHERE chat_id = ?`).bind(chatId).first();
+      await handleLevelTestAnswer(env, chatId, u?.pending_prompt || '{}', parseInt(parts[1], 10));
+    } else if (action === 'M') {
+      const menuAction = parts[1];
+      if (menuAction === 'leveltest') await startLevelTest(env, chatId);
+      else if (menuAction === 'new') {
+        const w = await newWord(env, chatId);
+        if (w) {
+          const saved = await env.DB.prepare(`SELECT * FROM words WHERE chat_id = ? ORDER BY id DESC LIMIT 1`).bind(chatId).first();
+          await sendReviewCard(env, chatId, saved);
+          const audio = await synthesizeSpeech(env, saved.word);
+          if (audio) await tgSendAudioFromBase64(env, chatId, audio, saved.word);
+        }
+      }
+      else if (menuAction === 'review') {
+        const r = await handleReview(env, chatId);
+        if (r) await tgSend(env, chatId, r);
+      }
+      else if (menuAction === 'videos') await showLevelMenu(env, chatId);
+      else if (menuAction === 'today') await todayVideo(env, chatId);
+      else if (menuAction === 'reading') await tgSend(env, chatId, await handleReading(env, chatId));
+      else if (menuAction === 'write') await tgSend(env, chatId, await startWriting(env, chatId));
+      else if (menuAction === 'speak') await tgSend(env, chatId, await startSpeaking(env, chatId));
+      else if (menuAction === 'roleplay') await showRoleplayMenu(env, chatId);
+      else if (menuAction === 'setlevel') await tgSend(env, chatId, '🎯 اختار مستواك الحالي:', levelKeyboard('SL'));
+      else if (menuAction === 'stats') await tgSend(env, chatId, await handleStats(env, chatId));
     }
 
     await tgAnswerCallback(env, cq.id, 'تم ✅');
@@ -642,6 +790,15 @@ async function handleUpdate(env, update) {
   let reply;
   if (text.startsWith('/')) {
     reply = await handleCommand(env, chatId, text);
+  } else if (mode === 'leveltest') {
+    let state;
+    try { state = JSON.parse(user.pending_prompt); } catch { state = null; }
+    if (state && state.phase === 'writing') {
+      await finishLevelTestWithWriting(env, chatId, state.mcqLevel, state.score, text);
+      reply = null;
+    } else {
+      reply = 'أنت وسط اختبار تحديد المستوى — اضغط أحد الأزرار فوق للإجابة، أو اكتب /cancel للإلغاء.';
+    }
   } else if (mode === 'writing') {
     reply = await gradeWriting(env, chatId, text, user.pending_prompt);
   } else if (mode === 'roleplay') {

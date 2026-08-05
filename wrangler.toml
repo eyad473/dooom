@@ -10,9 +10,12 @@ database_id = "145917cb-3dc1-4482-98f0-273994dd5549"
 [ai]
 binding = "AI"
 
-[[vectorize]]
-binding = "VECTORIZE"
-index_name = "content-index"
+# ميزة البحث الدلالي (/find) معطّلة مؤقتًا لحين إنشاء الـ Vectorize index من كمبيوتر:
+# wrangler vectorize create content-index --dimensions=768 --metric=cosine
+# بعدها فك التعليق عن الأسطر التالية وأعد النشر:
+# [[vectorize]]
+# binding = "VECTORIZE"
+# index_name = "content-index"
 
 # تذكير صباحي الساعة 8:00 بتوقيت غزة (UTC+3) = 5:00 UTC
 [triggers]

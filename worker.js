@@ -782,6 +782,7 @@ async function handleCommand(env, chatId, text) {
   }
 
   if (cmd === '/find') {
+    if (!env.VECTORIZE) return 'ميزة البحث الذكي لسا مش مفعّلة. تصفح الفيديوهات عادي عبر /videos لحد ما نفعّلها.';
     const query = parseArgs(text);
     if (!query) return 'اكتب شو بدك تلاقي بعد الأمر، مثال:\n/find مقابلة عمل';
     await semanticFindContent(env, chatId, query);
@@ -1046,6 +1047,7 @@ export default {
 
     // مسار إداري لفهرسة المحتوى بـ Vectorize — شغّله مرة وحدة بعد كل تحديث لجدول content
     if (request.method === 'GET' && url.pathname === `/admin/index/${env.WEBHOOK_SECRET}`) {
+      if (!env.VECTORIZE) return new Response('Vectorize مش مفعّل بعد — أنشئ الـ index وفعّل البايندنج بـ wrangler.toml أول.');
       try {
         const count = await indexAllContent(env);
         return new Response(`تمت فهرسة ${count} عنصر ✅`);

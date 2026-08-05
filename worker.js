@@ -7,10 +7,71 @@
  * Secrets: TELEGRAM_BOT_TOKEN, GEMINI_API_KEY, COHERE_API_KEY, WEBHOOK_SECRET
  */
 
-const COACH_PROMPT = `إنت مدرّب لغة إنجليزية لمتعلم مستواه A2 وبيحب أسلوب الانغماس (immersion).
-لو كتب لك بالإنجليزي: صحح أخطاءه بلطف (وضح الخطأ بجملة وحدة بالعربي)، وبعدين رد عليه بالإنجليزي بجمل بسيطة تناسب مستواه A2-B1.
-لو كتب لك بالعربي وسأل عن كلمة أو قاعدة: جاوبه بالعربي بإيجاز مع مثال إنجليزي.
-خلي ردودك قصيرة ومباشرة، بدون حشو، مناسبة لموبايل.`;
+function immersionInstruction(level) {
+  const i = LEVELS.indexOf(level);
+  if (i <= 1) return 'استخدم العربي بكثرة للشرح والتوضيح، والإنجليزي للجمل والأمثلة بس.';
+  if (i <= 3) return 'قلل العربي للحد الأدنى — استخدمه بس للقواعد المعقدة أو الكلمات النادرة، وخلي الباقي كله إنجليزي.';
+  return 'استخدم الإنجليزي بالكامل تقريبًا، عربي بس لو ضروري جدًا لفهم قاعدة معقدة جدًا.';
+}
+
+function buildCoachPrompt(level) {
+  return `إنت مدرّب لغة إنجليزية لمتعلم مستواه ${level} وبيحب أسلوب الانغماس (immersion).
+${immersionInstruction(level)}
+لو كتب لك بالإنجليزي وفيه خطأ: صحح أخطاءه بلطف، وبعدين رد عليه بالإنجليزي بجمل تناسب مستواه.
+لو كتب لك بالعربي وسأل عن كلمة أو قاعدة: جاوبه بإيجاز مع مثال إنجليزي.
+خلي ردودك قصيرة ومباشرة، بدون حشو، مناسبة لموبايل.
+انتهِ ردك دايمًا بسطر أخير بالضبط بهاد الشكل (بدون أي نص إضافي بعده): [CATEGORY: X]
+حيث X وحدة من هاي القيم بس: tenses, prepositions, articles, word_order, vocabulary, spelling, none
+اختار "none" لو ما في خطأ واضح بكلام المتعلم.`;
+}
+
+function parseAndStripCategory(text) {
+  const match = text.match(/\[CATEGORY:\s*(\w+)\]\s*$/i);
+  const category = match ? match[1].toLowerCase() : 'none';
+  const clean = match ? text.slice(0, match.index).trim() : text.trim();
+  return { clean, category };
+}
+
+async function logError(env, chatId, category) {
+  if (!category || category === 'none') return;
+  await env.DB.prepare(`INSERT INTO error_log (chat_id, category) VALUES (?, ?)`).bind(chatId, category).run();
+}
+
+const CATEGORY_LABELS_AR = {
+  tenses: 'الأزمنة',
+  prepositions: 'حروف الجر',
+  articles: 'أدوات التعريف (a/an/the)',
+  word_order: 'ترتيب الجملة',
+  vocabulary: 'المفردات',
+  spelling: 'الإملاء',
+};
+
+async function getWeakCategories(env, chatId, limit = 3) {
+  const { results } = await env.DB.prepare(
+    `SELECT category, COUNT(*) c FROM error_log WHERE chat_id = ? GROUP BY category ORDER BY c DESC LIMIT ?`
+  ).bind(chatId, limit).all();
+  return results;
+}
+
+async function handleWeakness(env, chatId) {
+  const weak = await getWeakCategories(env, chatId);
+  if (!weak.length) return 'لسا ما في بيانات كافية عن أخطائك. كمّل احكي واكتب بالبوت وبعد فترة رح أقدر أبني لك بروفايل دقيق.';
+
+  const lines = weak.map((w, i) => `${i + 1}. ${CATEGORY_LABELS_AR[w.category] || w.category} (${w.c} مرة)`);
+  return `📌 أكتر نقاط ضعفك تكرارًا:\n${lines.join('\n')}\n\nاضغط /focus لتمرين مركّز عليها الآن.`;
+}
+
+async function generateFocusedExercise(env, chatId) {
+  const weak = await getWeakCategories(env, chatId, 1);
+  if (!weak.length) return 'لسا ما في بيانات كافية عن أخطائك. جرب /weakness بعد ما تتفاعل أكتر بالبوت.';
+
+  const level = await getUserLevel(env, chatId);
+  const topCategory = CATEGORY_LABELS_AR[weak[0].category] || weak[0].category;
+  const prompt = `إنت مدرّب إنجليزي. المتعلم مستواه ${level} وأكتر نقطة ضعف عنده هي: ${topCategory}.
+اكتب درس مصغّر مختصر (3-4 أسطر) يشرح هاي النقطة بالعربي بإيجاز، وبعده 3 جمل إنجليزي فيها فراغ (___) يتمرن يعبيها تخص نفس النقطة، مع الجواب الصحيح لكل جملة مكتوب بجنبها بين قوسين.`;
+  const exercise = await callClaude(env, prompt, 'ولّد الدرس المصغر الآن', 500);
+  return `🎯 تمرين مركّز على: ${topCategory}\n\n${exercise}`;
+}
 
 const WORD_GEN_PROMPT = `إنت مولّد كلمات إنجليزية لمتعلم مستوى A2 يتبع أسلوب Oxford 3000.
 رجّع فقط JSON بدون أي نص إضافي وبدون Markdown، بهاد الشكل بالضبط:
@@ -52,7 +113,9 @@ function writingFeedbackPrompt(level) {
 1. تقييم عام (سطر وحد)
 2. أهم 2-3 أخطاء مع التصحيح
 3. نسخة محسّنة من النص (بالإنجليزي)
-خلي الرد قصير ومباشر مناسب لموبايل.`;
+خلي الرد قصير ومباشر مناسب لموبايل.
+انتهِ ردك دايمًا بسطر أخير بالضبط بهاد الشكل (بدون أي نص إضافي بعده): [CATEGORY: X]
+حيث X وحدة من هاي القيم بس (أكتر خطأ تكرر بالنص): tenses, prepositions, articles, word_order, vocabulary, spelling, none`;
 }
 
 function speakingPromptGen(level) {
@@ -100,6 +163,41 @@ async function synthesizeSpeech(env, text) {
   } catch (e) {
     console.error('TTS error', e);
     return null;
+  }
+}
+
+// ---------- بحث دلالي بمكتبة الفيديوهات (Vectorize) ----------
+async function embedText(env, text) {
+  const result = await env.AI.run('@cf/baai/bge-base-en-v1.5', { text: [text] });
+  return result?.data?.[0] || null;
+}
+
+async function indexAllContent(env) {
+  const { results } = await env.DB.prepare(`SELECT id, level, category, title_ar, search_query FROM content`).all();
+  let count = 0;
+  for (const row of results) {
+    const vector = await embedText(env, `${row.title_ar} ${row.search_query}`);
+    if (!vector) continue;
+    await env.VECTORIZE.upsert([{
+      id: String(row.id),
+      values: vector,
+      metadata: { level: row.level, category: row.category },
+    }]);
+    count += 1;
+  }
+  return count;
+}
+
+async function semanticFindContent(env, chatId, query) {
+  const vector = await embedText(env, query);
+  if (!vector) return tgSend(env, chatId, 'صار خلل بالبحث، جرب كمان مرة.');
+
+  const matches = await env.VECTORIZE.query(vector, { topK: 3, returnMetadata: true });
+  if (!matches?.matches?.length) return tgSend(env, chatId, 'ما لقيت نتائج مطابقة. جرب صياغة تانية.');
+
+  await tgSend(env, chatId, `🔍 أقرب نتائج لـ "${query}":`);
+  for (const m of matches.matches) {
+    await sendContentItem(env, chatId, parseInt(m.id, 10));
   }
 }
 
@@ -332,7 +430,9 @@ async function getUserLevel(env, chatId) {
 // ---------- القراءة ----------
 async function handleReading(env, chatId) {
   const level = await getUserLevel(env, chatId);
-  const raw = await callClaude(env, readingGenPrompt(level), 'ولّد نص قراءة الآن', 800);
+  const weak = await getWeakCategories(env, chatId, 1);
+  const focusNote = weak.length ? `\nركّز النص على استخدام صحيح لـ ${CATEGORY_LABELS_AR[weak[0].category] || weak[0].category} بشكل طبيعي ضمن القصة (بدون ما تذكر هالتعليمة بالنص نفسه).` : '';
+  const raw = await callClaude(env, readingGenPrompt(level) + focusNote, 'ولّد نص قراءة الآن', 800);
   let d;
   try {
     d = JSON.parse(cleanJson(raw));
@@ -353,11 +453,13 @@ async function startWriting(env, chatId) {
 
 async function gradeWriting(env, chatId, submission, prompt) {
   const level = await getUserLevel(env, chatId);
-  const feedback = await callClaude(env, writingFeedbackPrompt(level), submission, 600);
+  const raw = await callClaude(env, writingFeedbackPrompt(level), submission, 600);
+  const { clean, category } = parseAndStripCategory(raw);
+  await logError(env, chatId, category);
   await env.DB.prepare(`INSERT INTO writing_log (chat_id, prompt, submission, feedback) VALUES (?, ?, ?, ?)`)
-    .bind(chatId, prompt, submission, feedback).run();
+    .bind(chatId, prompt, submission, clean).run();
   await env.DB.prepare(`UPDATE users SET mode = 'idle', pending_prompt = NULL WHERE chat_id = ?`).bind(chatId).run();
-  return feedback;
+  return clean;
 }
 
 // ---------- التحدث ----------
@@ -411,7 +513,9 @@ async function startRoleplay(env, chatId, scenarioKey) {
   await env.DB.prepare(`UPDATE users SET mode = 'roleplay', pending_prompt = ? WHERE chat_id = ?`)
     .bind(scenarioKey, chatId).run();
 
-  const opener = await callClaude(env, scenario.system, 'ابدأ المحادثة الآن بجملة افتتاحية واحدة.', 200);
+  const level = await getUserLevel(env, chatId);
+  const system = `${scenario.system}\n${immersionInstruction(level)}`;
+  const opener = await callClaude(env, system, 'ابدأ المحادثة الآن بجملة افتتاحية واحدة.', 200);
   await env.DB.prepare(`INSERT INTO roleplay_history (chat_id, scenario, role, content) VALUES (?, ?, 'assistant', ?)`)
     .bind(chatId, scenarioKey, opener).run();
 
@@ -421,6 +525,9 @@ async function startRoleplay(env, chatId, scenarioKey) {
 async function roleplayChat(env, chatId, scenarioKey, userText) {
   const scenario = ROLEPLAY_SCENARIOS[scenarioKey];
   if (!scenario) return 'صار خلل، جرب /roleplay من جديد.';
+
+  const level = await getUserLevel(env, chatId);
+  const system = `${scenario.system}\n${immersionInstruction(level)}`;
 
   const history = await env.DB.prepare(
     `SELECT role, content FROM roleplay_history WHERE chat_id = ? AND scenario = ? ORDER BY id DESC LIMIT 10`
@@ -434,7 +541,7 @@ async function roleplayChat(env, chatId, scenarioKey, userText) {
     ? `${transcript}\nLearner: ${userText}\nYou:`
     : `Learner: ${userText}\nYou:`;
 
-  const reply = (await callClaude(env, scenario.system, fullPrompt, 400)) || '...';
+  const reply = (await callClaude(env, system, fullPrompt, 400)) || '...';
 
   await env.DB.batch([
     env.DB.prepare(`INSERT INTO roleplay_history (chat_id, scenario, role, content) VALUES (?, ?, 'user', ?)`).bind(chatId, scenarioKey, userText),
@@ -460,39 +567,32 @@ async function endRoleplay(env, chatId, scenarioKey) {
 
 // ---------- اختبار تحديد المستوى ----------
 const LEVEL_TEST_QUESTIONS = [
-  // قواعد (12 سؤال، صعوبة متدرجة)
-  { q: 'I ___ a student.', opts: ['is', 'am', 'are', 'be'], correct: 1 },
-  { q: 'She ___ to school every day.', opts: ['go', 'goes', 'going', 'gone'], correct: 1 },
-  { q: 'There ___ some milk in the fridge.', opts: ['is', 'are', 'be', 'am'], correct: 0 },
-  { q: 'He has been living here ___ 2019.', opts: ['since', 'for', 'from', 'at'], correct: 0 },
-  { q: 'If I ___ more time, I would travel more.', opts: ['have', 'had', 'has', 'will have'], correct: 1 },
-  { q: 'By the time we arrived, the movie ___.', opts: ['started', 'has started', 'had started', 'starts'], correct: 2 },
-  { q: "She's the person ___ car was stolen.", opts: ['who', 'whose', 'which', 'that'], correct: 1 },
-  { q: 'I wish I ___ harder for the exam.', opts: ['study', 'studied', 'had studied', 'would study'], correct: 2 },
-  { q: 'Hardly ___ the door when the phone rang.', opts: ['I had opened', 'had I opened', 'I opened', 'did I opened'], correct: 1 },
-  { q: 'The report ___ by tomorrow.', opts: ['will complete', 'will be completed', 'completes', 'is completing'], correct: 1 },
-  { q: 'Not until she apologized ___ willing to forgive her.', opts: ['I was', 'was I', 'I had been', 'had I been'], correct: 1 },
-  { q: '"It\'s raining cats and dogs" means:', opts: ['light rain', 'very heavy rain', 'no rain', 'snow'], correct: 1 },
+  // قواعد (12 سؤال، صعوبة متدرجة) — level: 1=A1 ... 6=C2
+  { q: 'I ___ a student.', opts: ['is', 'am', 'are', 'be'], correct: 1, level: 1 },
+  { q: 'She ___ to school every day.', opts: ['go', 'goes', 'going', 'gone'], correct: 1, level: 1 },
+  { q: 'There ___ some milk in the fridge.', opts: ['is', 'are', 'be', 'am'], correct: 0, level: 2 },
+  { q: 'He has been living here ___ 2019.', opts: ['since', 'for', 'from', 'at'], correct: 0, level: 2 },
+  { q: 'If I ___ more time, I would travel more.', opts: ['have', 'had', 'has', 'will have'], correct: 1, level: 3 },
+  { q: 'By the time we arrived, the movie ___.', opts: ['started', 'has started', 'had started', 'starts'], correct: 2, level: 3 },
+  { q: "She's the person ___ car was stolen.", opts: ['who', 'whose', 'which', 'that'], correct: 1, level: 4 },
+  { q: 'I wish I ___ harder for the exam.', opts: ['study', 'studied', 'had studied', 'would study'], correct: 2, level: 4 },
+  { q: 'Hardly ___ the door when the phone rang.', opts: ['I had opened', 'had I opened', 'I opened', 'did I opened'], correct: 1, level: 5 },
+  { q: 'The report ___ by tomorrow.', opts: ['will complete', 'will be completed', 'completes', 'is completing'], correct: 1, level: 5 },
+  { q: 'Not until she apologized ___ willing to forgive her.', opts: ['I was', 'was I', 'I had been', 'had I been'], correct: 1, level: 6 },
+  { q: '"It\'s raining cats and dogs" means:', opts: ['light rain', 'very heavy rain', 'no rain', 'snow'], correct: 1, level: 4 },
   // مفردات (6 أسئلة، صعوبة متدرجة)
-  { q: "What does 'happy' mean?", opts: ['sad', 'glad', 'angry', 'tired'], correct: 1 },
-  { q: "Choose the opposite of 'expensive':", opts: ['cheap', 'costly', 'large', 'small'], correct: 0 },
-  { q: "'Postpone' means:", opts: ['cancel', 'delay', 'finish', 'start'], correct: 1 },
-  { q: "'Reliable' means:", opts: ['untrustworthy', 'trustworthy', 'fast', 'slow'], correct: 1 },
-  { q: "'Meticulous' means:", opts: ['careless', 'very careful and precise', 'lazy', 'generous'], correct: 1 },
-  { q: "'Ubiquitous' means:", opts: ['rare', 'present everywhere', 'hidden', 'expensive'], correct: 1 },
+  { q: "What does 'happy' mean?", opts: ['sad', 'glad', 'angry', 'tired'], correct: 1, level: 1 },
+  { q: "Choose the opposite of 'expensive':", opts: ['cheap', 'costly', 'large', 'small'], correct: 0, level: 2 },
+  { q: "'Postpone' means:", opts: ['cancel', 'delay', 'finish', 'start'], correct: 1, level: 3 },
+  { q: "'Reliable' means:", opts: ['untrustworthy', 'trustworthy', 'fast', 'slow'], correct: 1, level: 3 },
+  { q: "'Meticulous' means:", opts: ['careless', 'very careful and precise', 'lazy', 'generous'], correct: 1, level: 4 },
+  { q: "'Ubiquitous' means:", opts: ['rare', 'present everywhere', 'hidden', 'expensive'], correct: 1, level: 5 },
   // فهم قرائي (نص + سؤالين)
-  { q: 'Read: "Maya works as a nurse in a busy hospital. She usually starts her shift at 7 a.m. and finishes at 3 p.m. On weekends, she volunteers at a community clinic to help people who cannot afford medical care."\n\nWhat time does Maya start work?', opts: ['6 a.m.', '7 a.m.', '3 p.m.', '8 a.m.'], correct: 1 },
-  { q: 'Same passage — Why does Maya volunteer on weekends?', opts: ['She needs more money', "To help people who can't afford care", 'Her boss told her to', 'She is bored'], correct: 1 },
+  { q: 'Read: "Maya works as a nurse in a busy hospital. She usually starts her shift at 7 a.m. and finishes at 3 p.m. On weekends, she volunteers at a community clinic to help people who cannot afford medical care."\n\nWhat time does Maya start work?', opts: ['6 a.m.', '7 a.m.', '3 p.m.', '8 a.m.'], correct: 1, level: 3 },
+  { q: 'Same passage — Why does Maya volunteer on weekends?', opts: ['She needs more money', "To help people who can't afford care", 'Her boss told her to', 'She is bored'], correct: 1, level: 3 },
 ];
 
-function levelFromScore(score) {
-  if (score <= 3) return 'A1';
-  if (score <= 7) return 'A2';
-  if (score <= 11) return 'B1';
-  if (score <= 15) return 'B2';
-  if (score <= 18) return 'C1';
-  return 'C2';
-}
+
 
 function levelToIndex(lvl) {
   const i = LEVELS.indexOf(lvl);
@@ -503,41 +603,65 @@ function indexToLevel(i) {
   return LEVELS[Math.min(Math.max(Math.round(i), 0), LEVELS.length - 1)];
 }
 
-function levelTestKeyboard(qIndex) {
-  const q = LEVEL_TEST_QUESTIONS[qIndex];
+function levelTestKeyboard(q) {
   return q.opts.map((opt, i) => ([{ text: opt, callback_data: `LT:${i}` }]));
 }
 
+const ADAPTIVE_MAX_ROUNDS = 10;
+
+function pickQuestionAtLevel(targetLevel, askedIdx) {
+  // يدور بالمستوى المطلوب أول شي، وبعدين يوسّع لجيران المستوى لو ما لقى سؤال متاح
+  for (let d = 0; d <= 5; d++) {
+    for (const lvl of [targetLevel - d, targetLevel + d]) {
+      if (lvl < 1 || lvl > 6) continue;
+      const idx = LEVEL_TEST_QUESTIONS.findIndex((q, i) => q.level === lvl && !askedIdx.includes(i));
+      if (idx !== -1) return idx;
+    }
+  }
+  return -1;
+}
+
 async function startLevelTest(env, chatId) {
+  const startLevel = 3; // يبلش من المنتصف تقريبًا (B1)
+  const qIdx = pickQuestionAtLevel(startLevel, []);
+  const state = { askedIdx: [qIdx], levelsAsked: [startLevel], currentLevel: startLevel, round: 1, questionIdx: qIdx };
   await env.DB.prepare(`UPDATE users SET mode = 'leveltest', pending_prompt = ? WHERE chat_id = ?`)
-    .bind(JSON.stringify({ i: 0, score: 0 }), chatId).run();
-  const q = LEVEL_TEST_QUESTIONS[0];
-  await tgSend(env, chatId, `📝 اختبار تحديد المستوى (سؤال 1 من ${LEVEL_TEST_QUESTIONS.length})\n\n${q.q}`, levelTestKeyboard(0));
+    .bind(JSON.stringify(state), chatId).run();
+  const q = LEVEL_TEST_QUESTIONS[qIdx];
+  await tgSend(env, chatId, `📝 اختبار تحديد المستوى (تكيّفي — بيسهل أو يصعّب حسب إجاباتك)\nسؤال 1 من ~${ADAPTIVE_MAX_ROUNDS}\n\n${q.q}`, levelTestKeyboard(q));
 }
 
 async function handleLevelTestAnswer(env, chatId, pendingPrompt, chosenIndex) {
   let state;
-  try { state = JSON.parse(pendingPrompt); } catch { state = { i: 0, score: 0 }; }
+  try { state = JSON.parse(pendingPrompt); } catch { return; }
 
-  const q = LEVEL_TEST_QUESTIONS[state.i];
-  if (chosenIndex === q.correct) state.score += 1;
-  state.i += 1;
+  const q = LEVEL_TEST_QUESTIONS[state.questionIdx];
+  const correct = chosenIndex === q.correct;
+  state.currentLevel = correct ? Math.min(6, state.currentLevel + 1) : Math.max(1, state.currentLevel - 1);
 
-  if (state.i >= LEVEL_TEST_QUESTIONS.length) {
-    const mcqLevel = levelFromScore(state.score);
+  const nextIdx = state.round >= ADAPTIVE_MAX_ROUNDS ? -1 : pickQuestionAtLevel(state.currentLevel, state.askedIdx);
+
+  if (nextIdx === -1) {
+    const avgLevel = state.levelsAsked.reduce((a, b) => a + b, 0) / state.levelsAsked.length;
+    const mcqLevel = indexToLevel(avgLevel - 1); // levelsAsked مبني على 1-6، نحوّلها لفهرس 0-5
     await env.DB.prepare(`UPDATE users SET pending_prompt = ? WHERE chat_id = ?`)
-      .bind(JSON.stringify({ phase: 'writing', mcqLevel, score: state.score }), chatId).run();
-    await tgSend(env, chatId, `✅ خلصت الأسئلة! (${state.score}/${LEVEL_TEST_QUESTIONS.length})\n\nآخر خطوة: اكتب 2-3 جمل بالإنجليزي عن نفسك أو يومك — هاد بيساعدني أدق نتيجتك أكتر.`);
+      .bind(JSON.stringify({ phase: 'writing', mcqLevel, score: state.levelsAsked.length }), chatId).run();
+    await tgSend(env, chatId, `✅ خلصت الأسئلة! (${state.round} سؤال)\n\nآخر خطوة: اكتب 2-3 جمل بالإنجليزي عن نفسك أو يومك — هاد بيساعدني أدق نتيجتك أكتر.`);
     return;
   }
 
+  state.askedIdx.push(nextIdx);
+  state.levelsAsked.push(state.currentLevel);
+  state.round += 1;
+  state.questionIdx = nextIdx;
+
   await env.DB.prepare(`UPDATE users SET pending_prompt = ? WHERE chat_id = ?`)
     .bind(JSON.stringify(state), chatId).run();
-  const nextQ = LEVEL_TEST_QUESTIONS[state.i];
-  await tgSend(env, chatId, `📝 سؤال ${state.i + 1} من ${LEVEL_TEST_QUESTIONS.length}\n\n${nextQ.q}`, levelTestKeyboard(state.i));
+  const nextQ = LEVEL_TEST_QUESTIONS[nextIdx];
+  await tgSend(env, chatId, `📝 سؤال ${state.round} من ~${ADAPTIVE_MAX_ROUNDS}\n\n${nextQ.q}`, levelTestKeyboard(nextQ));
 }
 
-async function finishLevelTestWithWriting(env, chatId, mcqLevel, score, writingSample) {
+async function finishLevelTestWithWriting(env, chatId, mcqLevel, roundsCount, writingSample) {
   const assessPrompt = `You are an English level assessor. Read the learner's sentences and reply with ONLY one label, nothing else: A1, A2, B1, B2, C1, or C2.`;
   const raw = (await callClaude(env, assessPrompt, writingSample, 10)).trim().toUpperCase();
   const aiLevel = LEVELS.includes(raw) ? raw : mcqLevel;
@@ -548,8 +672,10 @@ async function finishLevelTestWithWriting(env, chatId, mcqLevel, score, writingS
   await env.DB.prepare(`UPDATE users SET mode = 'idle', pending_prompt = NULL, level = ? WHERE chat_id = ?`)
     .bind(finalLevel, chatId).run();
 
-  await tgSend(env, chatId, `🎉 خلص الاختبار!\nنتيجة الأسئلة: ${score}/${LEVEL_TEST_QUESTIONS.length} (≈ ${mcqLevel})\nتقييم الكتابة: ≈ ${aiLevel}\n\nمستواك النهائي: <b>${finalLevel}</b>\nتم ضبطه تلقائيًا بالبوت. رح تجيك فيديوهات ونصوص واقتراحات يومية بهاد المستوى.`);
+  await tgSend(env, chatId, `🎉 خلص الاختبار!\nتقدير الأسئلة التكيّفية: ≈ ${mcqLevel}\nتقييم الكتابة: ≈ ${aiLevel}\n\nمستواك النهائي: <b>${finalLevel}</b>\nتم ضبطه تلقائيًا بالبوت. رح تجيك فيديوهات ونصوص واقتراحات يومية بهاد المستوى.`);
 }
+
+
 
 // ---------- القائمة الرئيسية التفاعلية ----------
 function mainMenuKeyboard() {
@@ -559,6 +685,8 @@ function mainMenuKeyboard() {
     [{ text: '🎧 فيديوهات', callback_data: 'M:videos' }, { text: '🎬 فيديو اليوم', callback_data: 'M:today' }],
     [{ text: '📖 قراءة', callback_data: 'M:reading' }, { text: '✍️ كتابة', callback_data: 'M:write' }],
     [{ text: '🎙️ تحدث', callback_data: 'M:speak' }, { text: '🎭 محادثة تمثيلية', callback_data: 'M:roleplay' }],
+    [{ text: '📌 نقاط ضعفي', callback_data: 'M:weakness' }, { text: '🎯 تمرين مركّز', callback_data: 'M:focus' }],
+    [{ text: '🗓️ منهجي الأسبوعي', callback_data: 'M:plan' }],
     [{ text: '⚙️ تغيير المستوى', callback_data: 'M:setlevel' }, { text: '📊 إحصائياتي', callback_data: 'M:stats' }],
   ];
 }
@@ -636,7 +764,7 @@ async function handleCommand(env, chatId, text) {
   }
 
   if (cmd === '/help' || cmd === '/skills') {
-    return `📋 /menu - القائمة التفاعلية (أزرار)\n📝 /leveltest - اختبار تحديد المستوى\n📗 /new /review - مفردات\n🎧 /videos /todayvideo - استماع\n📖 /reading - قراءة\n✍️ /write - كتابة (بترسل نص بعدها)\n🎙️ /speak - تحدث (بترسل رسالة صوتية بعدها)\n🎭 /roleplay - محادثة تمثيلية (مقابلة عمل/مطعم/مطار/تسوق)\n🔊 /pronounce (نص) - نطق صوتي\n⚙️ /setlevel - تحديد المستوى يدويًا\n📊 /stats - إحصائيات وسلسلة أيامك\n❌ /cancel أو /endroleplay - إلغاء تمرين حالي`;
+    return `📋 /menu - القائمة التفاعلية (أزرار)\n📝 /leveltest - اختبار تحديد المستوى (تكيّفي)\n📗 /new /review - مفردات\n🎧 /videos /todayvideo - استماع\n🔍 /find (وصف) - بحث ذكي بالفيديوهات\n📖 /reading - قراءة\n✍️ /write - كتابة (بترسل نص بعدها)\n🎙️ /speak - تحدث (بترسل رسالة صوتية بعدها)\n🎭 /roleplay - محادثة تمثيلية\n🔊 /pronounce (نص) - نطق صوتي\n📌 /weakness - نقاط ضعفك\n🎯 /focus - تمرين مركّز على أضعف نقطة\n🗓️ /plan - منهجك الأسبوعي\n⚙️ /setlevel - تحديد المستوى يدويًا\n📊 /stats - إحصائيات وسلسلة أيامك\n❌ /cancel أو /endroleplay - إلغاء تمرين حالي`;
   }
 
   if (cmd === '/reading') return await handleReading(env, chatId);
@@ -652,6 +780,17 @@ async function handleCommand(env, chatId, text) {
     await sendMainMenu(env, chatId);
     return null;
   }
+
+  if (cmd === '/find') {
+    const query = parseArgs(text);
+    if (!query) return 'اكتب شو بدك تلاقي بعد الأمر، مثال:\n/find مقابلة عمل';
+    await semanticFindContent(env, chatId, query);
+    return null;
+  }
+
+  if (cmd === '/weakness') return await handleWeakness(env, chatId);
+  if (cmd === '/focus') return await generateFocusedExercise(env, chatId);
+  if (cmd === '/plan') return await handleWeeklyPlan(env, chatId);
 
   if (cmd === '/cancel') {
     await env.DB.prepare(`UPDATE users SET mode = 'idle', pending_prompt = NULL WHERE chat_id = ?`).bind(chatId).run();
@@ -758,6 +897,9 @@ async function handleUpdate(env, update) {
       else if (menuAction === 'roleplay') await showRoleplayMenu(env, chatId);
       else if (menuAction === 'setlevel') await tgSend(env, chatId, '🎯 اختار مستواك الحالي:', levelKeyboard('SL'));
       else if (menuAction === 'stats') await tgSend(env, chatId, await handleStats(env, chatId));
+      else if (menuAction === 'weakness') await tgSend(env, chatId, await handleWeakness(env, chatId));
+      else if (menuAction === 'focus') await tgSend(env, chatId, await generateFocusedExercise(env, chatId));
+      else if (menuAction === 'plan') await tgSend(env, chatId, await handleWeeklyPlan(env, chatId));
     }
 
     await tgAnswerCallback(env, cq.id, 'تم ✅');
@@ -805,7 +947,11 @@ async function handleUpdate(env, update) {
     reply = await roleplayChat(env, chatId, user.pending_prompt, text);
   } else {
     // محادثة حرة - تدريب لغوي
-    reply = await callClaude(env, COACH_PROMPT, text, 500);
+    const userLevel = await getUserLevel(env, chatId);
+    const rawReply = await callClaude(env, buildCoachPrompt(userLevel), text, 500);
+    const { clean, category } = parseAndStripCategory(rawReply);
+    reply = clean;
+    await logError(env, chatId, category);
     await env.DB.batch([
       env.DB.prepare(`INSERT INTO chat_history (chat_id, role, content) VALUES (?, 'user', ?)`).bind(chatId, text),
       env.DB.prepare(`INSERT INTO chat_history (chat_id, role, content) VALUES (?, 'assistant', ?)`).bind(chatId, reply),
@@ -815,10 +961,50 @@ async function handleUpdate(env, update) {
   if (reply) await tgSend(env, chatId, reply);
 }
 
+// ---------- المنهج الأسبوعي المولّد تلقائيًا ----------
+const WEEKDAY_NAMES_AR = ['الأحد', 'الاثنين', 'الثلاثاء', 'الأربعاء', 'الخميس', 'الجمعة', 'السبت'];
+
+function getWeekStart() {
+  const d = new Date();
+  const sunday = new Date(d);
+  sunday.setUTCDate(d.getUTCDate() - d.getUTCDay());
+  return sunday.toISOString().slice(0, 10);
+}
+
+async function getOrCreateWeeklyPlan(env, chatId) {
+  const weekStart = getWeekStart();
+  const existing = await env.DB.prepare(
+    `SELECT plan_json FROM weekly_plan WHERE chat_id = ? AND week_start = ?`
+  ).bind(chatId, weekStart).first();
+  if (existing) return JSON.parse(existing.plan_json);
+
+  const weak = await getWeakCategories(env, chatId, 1);
+  const weakLabel = weak.length ? (CATEGORY_LABELS_AR[weak[0].category] || weak[0].category) : null;
+
+  const plan = [
+    { day: 'الأحد', focus: 'مفردات جديدة', cmd: '/new' },
+    { day: 'الاثنين', focus: weakLabel ? `مراجعة قواعد — ${weakLabel}` : 'مراجعة كلمات', cmd: weakLabel ? '/focus' : '/review' },
+    { day: 'الثلاثاء', focus: 'استماع (فيديو)', cmd: '/todayvideo' },
+    { day: 'الأربعاء', focus: 'قراءة', cmd: '/reading' },
+    { day: 'الخميس', focus: 'كتابة', cmd: '/write' },
+    { day: 'الجمعة', focus: 'محادثة تمثيلية', cmd: '/roleplay' },
+    { day: 'السبت', focus: 'تحدث', cmd: '/speak' },
+  ];
+
+  await env.DB.prepare(`INSERT INTO weekly_plan (chat_id, week_start, plan_json) VALUES (?, ?, ?)`)
+    .bind(chatId, weekStart, JSON.stringify(plan)).run();
+  return plan;
+}
+
+async function handleWeeklyPlan(env, chatId) {
+  const plan = await getOrCreateWeeklyPlan(env, chatId);
+  const lines = plan.map(p => `${p.day}: ${p.focus} (${p.cmd})`);
+  return `🗓️ منهجك الأسبوعي (مبني على مستواك وأخطائك المتكررة):\n${lines.join('\n')}`;
+}
+
 async function dailyReminder(env) {
   const { results } = await env.DB.prepare(`SELECT chat_id FROM users`).all();
-  const dayIndex = Math.floor(Date.now() / 86400000) % 3; // يدوّر بين 3 مهارات إضافية يوميًا
-  const skillNudge = ['reading', 'writing', 'speaking'][dayIndex];
+  const todayName = WEEKDAY_NAMES_AR[new Date().getUTCDay()];
 
   for (const u of results) {
     const streakInfo = await env.DB.prepare(`SELECT streak, last_active FROM users WHERE chat_id = ?`).bind(u.chat_id).first();
@@ -837,12 +1023,10 @@ async function dailyReminder(env) {
     }
     await todayVideo(env, u.chat_id);
 
-    if (skillNudge === 'reading') {
-      await tgSend(env, u.chat_id, '📖 نص قراءة اليوم جاهز: /reading');
-    } else if (skillNudge === 'writing') {
-      await tgSend(env, u.chat_id, '✍️ تمرين كتابة قصير اليوم: /write');
-    } else {
-      await tgSend(env, u.chat_id, '🎙️ جرب تمرين تحدث اليوم: /speak');
+    const plan = await getOrCreateWeeklyPlan(env, u.chat_id);
+    const todayTask = plan.find(p => p.day === todayName);
+    if (todayTask) {
+      await tgSend(env, u.chat_id, `🗓️ مهمة اليوم حسب خطتك: ${todayTask.focus}\nاكتب ${todayTask.cmd}`);
     }
   }
 }
@@ -859,6 +1043,17 @@ export default {
       }
       return new Response('OK');
     }
+
+    // مسار إداري لفهرسة المحتوى بـ Vectorize — شغّله مرة وحدة بعد كل تحديث لجدول content
+    if (request.method === 'GET' && url.pathname === `/admin/index/${env.WEBHOOK_SECRET}`) {
+      try {
+        const count = await indexAllContent(env);
+        return new Response(`تمت فهرسة ${count} عنصر ✅`);
+      } catch (e) {
+        return new Response(`خطأ بالفهرسة: ${e.message}`, { status: 500 });
+      }
+    }
+
     return new Response('بوت تعلم الإنجليزي شغال ✅');
   },
 
